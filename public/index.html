@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Clinic Booking</title>
+<style>
+  body{font-family:system-ui,sans-serif;max-width:640px;margin:2rem auto;padding:0 1rem;color:#222}
+  h1{font-size:1.5rem} h2{font-size:1.1rem;margin-top:0}
+  .card{border:1px solid #ddd;border-radius:8px;padding:1rem;margin:1rem 0}
+  .slot{display:flex;justify-content:space-between;align-items:center;padding:.5rem 0;border-bottom:1px solid #eee}
+  button{padding:.45rem .9rem;border:0;border-radius:6px;background:#111;color:#fff;cursor:pointer}
+  button:disabled{background:#aaa;cursor:not-allowed}
+  input{width:100%;padding:.5rem;margin:.25rem 0 .75rem;box-sizing:border-box;border:1px solid #bbb;border-radius:6px}
+  .err{color:#b00020}.ok{color:#0a6b2d}.muted{color:#777;font-size:.9rem}
+</style>
+</head>
+<body>
+<h1>Book a clinic appointment</h1>
+
+<div class="card">
+  <label for="key">API key</label>
+  <input id="key" type="password" placeholder="Paste the API key">
+  <button id="load">Load slots</button>
+</div>
+
+<div class="card">
+  <h2>Available slots</h2>
+  <div id="slots" class="muted">Enter the API key and press "Load slots".</div>
+</div>
+
+<div class="card" id="formCard" hidden>
+  <h2>Your details</h2>
+  <div id="chosen" class="muted"></div>
+  <label for="name">Name</label>
+  <input id="name" placeholder="Ada Obi">
+  <label for="email">Email</label>
+  <input id="email" placeholder="ada@example.com">
+  <button id="book">Book this slot</button>
+  <div id="formMsg"></div>
+</div>
+
+<div class="card" id="confirm" hidden></div>
+
+<div class="card">
+  <h2>Look up a booking</h2>
+  <input id="lookupId" placeholder="Booking id">
+  <button id="lookup">Look up</button>
+  <div id="lookupOut" class="muted"></div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const fmt = (iso) => new Date(iso).toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
+let chosen = null, idemKey = null;
+
+try { $("key").value = sessionStorage.getItem("k") || ""; } catch (_) {}
+
+async function api(path, opts = {}) {
+  const r = await fetch(path, {
+    ...opts,
+    headers: { "X-API-Key": $("key").value.trim(), "Content-Type": "application/json", ...(opts.headers || {}) },
+  });
+  let data = {};
+  try { data = await r.json(); } catch (_) {}
+  return { ok: r.ok, status: r.status, data, retryAfter: r.headers.get("Retry-After") };
+}
+
+async function loadSlots() {
+  try { sessionStorage.setItem("k", $("key").value.trim()); } catch (_) {}
+  const r = await api("/slots");
+  if (!r.ok) {
+    $("slots").innerHTML = '<span class="err">' + esc(r.data.error || "Error " + r.status) + "</span>";
+    return;
+  }
+  if (!r.data.slots.length) { $("slots").textContent = "No slots."; return; }
+  $("slots").innerHTML = "";
+  for (const s of r.data.slots) {
+    const row = document.createElement("div");
+    row.className = "slot";
+    row.innerHTML = "<span><b>" + esc(s.provider) + "</b><br><span class='muted'>" + esc(fmt(s.start)) + " – " + esc(fmt(s.end)) + "</span></span>";
+    const b = document.createElement("button");
+    b.textContent = s.available ? "Book" : "Booked";
+    b.disabled = !s.available;
+    b.onclick = () => choose(s);
+    row.appendChild(b);
+    $("slots").appendChild(row);
+  }
+}
+
+function choose(s) {
+  chosen = s;
+  idemKey = crypto.randomUUID();
+  $("chosen").textContent = s.provider + " · " + fmt(s.start);
+  $("formMsg").textContent = "";
+  $("formCard").hidden = false;
+  $("confirm").hidden = true;
+  $("name").focus();
+}
+
+async function book() {
+  if (!chosen) return;
+  $("book").disabled = true;
+  const r = await api("/bookings", {
+    method: "POST",
+    headers: { "Idempotency-Key": idemKey },
+    body: JSON.stringify({ slot_id: chosen.id, name: $("name").value, email: $("email").value }),
+  });
+  $("book").disabled = false;
+  if (r.ok) {
+    const b = r.data;
+    $("formCard").hidden = true;
+    $("confirm").hidden = false;
+    $("confirm").innerHTML =
+      "<h2 class='ok'>Booking confirmed</h2>" +
+      "<p>" + esc(chosen.provider) + " · " + esc(fmt(chosen.start)) + "</p>" +
+      "<p>Name: " + esc(b.name) + "<br>Email: " + esc(b.email) + "<br>Booking id: <b>" + esc(b.id) + "</b></p>" +
+      "<button id='cancel'>Cancel this booking</button> <span id='cancelMsg'></span>";
+    $("cancel").onclick = () => cancelBooking(b.id);
+    chosen = null; idemKey = null;
+    loadSlots();
+  } else {
+    let msg = r.data.error || "Error " + r.status;
+    if (r.status === 429) msg += " (try again in " + r.retryAfter + "s)";
+    $("formMsg").innerHTML = '<span class="err">' + esc(msg) + "</span>";
+    if (r.status === 409) loadSlots();
+  }
+}
+
+async function cancelBooking(id) {
+  const r = await api("/bookings/" + encodeURIComponent(id), { method: "DELETE" });
+  $("cancelMsg").innerHTML = r.ok ? '<span class="ok">Cancelled.</span>' : '<span class="err">' + esc(r.data.error || "Error") + "</span>";
+  if (r.ok) loadSlots();
+}
+
+async function lookup() {
+  const id = $("lookupId").value.trim();
+  if (!id) return;
+  const r = await api("/bookings/" + encodeURIComponent(id));
+  $("lookupOut").innerHTML = r.ok
+    ? "Status: <b>" + esc(r.data.status) + "</b><br>" + esc(r.data.name) + " · " + esc(r.data.email) + "<br>Slot: " + esc(r.data.slot_id)
+    : '<span class="err">' + esc(r.data.error || "Error " + r.status) + "</span>";
+}
+
+$("load").onclick = loadSlots;
+$("book").onclick = book;
+$("lookup").onclick = lookup;
+</script>
+</body>
+</html>
